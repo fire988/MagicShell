@@ -1,6 +1,6 @@
 {
   "name": "magicshell",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "分组式 PowerShell 终端工作台（每个终端独立配色/标题/启动目录 · 目录历史逐级回退 · 可收起可拖宽的侧边栏 · 分组平铺 · 复制全部 · 分组置顶）",
   "main": "src/main.js",
   "author": "fire988",

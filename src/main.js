@@ -275,6 +275,13 @@ function createWindow() {
   Menu.setApplicationMenu(null);
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  // 渲染层重新加载（Ctrl+R、崩溃后重载）时，旧页面里的 PTY 已经没人管了 —— 统一收掉，
+  // 否则主进程里会攒下一批看不见的孤儿 PowerShell。
+  mainWindow.webContents.on('did-start-loading', () => {
+    for (const [, s] of sessions) { try { s.pty.kill(); } catch { /* ignore */ } }
+    sessions.clear();
+  });
+
   mainWindow.once('ready-to-show', () => {
     // 先把最大化/全屏还原，再显示，避免先闪一下小窗口
     if (saved.fullscreen) mainWindow.setFullScreen(true);
@@ -529,6 +536,13 @@ function registerIpc() {
     if (!s) return;
     try { s.pty.kill(); } catch { /* ignore */ }
     sessions.delete(id);
+  });
+
+  // 只读：当前真实存活多少个 PTY（自检用来断言"停止"确实回收了进程，而不是只改界面开关）
+  ipcMain.handle('pty:stats', () => {
+    const ids = [];
+    for (const [id, s] of sessions) if (s && s.pty) ids.push(id);
+    return { count: ids.length, ids };
   });
 }
 

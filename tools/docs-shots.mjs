@@ -211,6 +211,24 @@ await typeLine('Start-Sleep -Milliseconds 900');
 await sleep(600);
 await shot('docs/screenshot-cmd.png');
 
+// 停止 / 启动：停掉右边那个（屏幕上还留着刚才的输出与「已停止」横幅），
+// 左边继续跑，侧栏的分组徽标变 2/3、电源按钮变 ▶
+await ev(`
+  const A = __ms.actions, S = __ms.state;
+  const g = S.groups.find((x) => x.id === S.activeId);
+  A.stopPane(__ms.paneMap.get(g.panes[1].id));
+  await new Promise((r) => setTimeout(r, 1000));
+  return true;
+`);
+await shot('docs/screenshot-pause.png');
+await ev(`
+  const A = __ms.actions, S = __ms.state;
+  const g = S.groups.find((x) => x.id === S.activeId);
+  A.startPane(__ms.paneMap.get(g.panes[1].id));
+  await new Promise((r) => setTimeout(r, 2800));
+  return true;
+`);
+
 // 英文界面：切语言立刻生效、不重启；顺手开个右键菜单看菜单项也跟着变
 await ev(`
   const sel = document.getElementById('input-language');

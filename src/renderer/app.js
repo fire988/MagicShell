@@ -507,9 +507,10 @@ function activateGroup(id) {
   syncPinUI();
 
   // 进入分组时：把本组还没启动的终端拉起来（懒加载，避免一次开一堆 PowerShell）
+  // 但用户主动停掉的终端不在此列 —— 否则切一次组就自动复活，等于白停
   for (const meta of group.panes) {
     const pane = paneMap.get(meta.id);
-    if (pane && !pane.running && !pane.exited) ensureSpawn(pane);
+    if (pane && !pane.running && !pane.exited && !meta.suspended) ensureSpawn(pane);
   }
   syncGroupRects(group);
   requestAnimationFrame(() => refitGroup(group));
@@ -873,12 +874,26 @@ function renderSidebar() {
       </div>
       <div class="group-name" title="${escapeHtml(group.name)}">${escapeHtml(group.name)}</div>
       <svg class="group-pin" viewBox="0 0 16 16" width="12" height="12"><path d="M9.6 1.6l4.8 4.8-2 .6-3 3 .4 2.4-3.6 3.6-.7-.7-3.2-3.2-.7-.7 3.6-3.6 2.4.4 3-3 .6-2z" fill="currentColor"/></svg>
+      <button class="group-power" type="button"></button>
       <span class="group-badge">${group.panes.length}</span>`;
 
     item.addEventListener('click', (e) => {
       if (e.target.closest('.group-name-input')) return;
       activateGroup(group.id);
       focusActivePane();   // 切组顺手把键盘焦点交给该组的终端，点完就能直接打字
+    });
+    const power = item.querySelector('.group-power');
+    // 点电源按钮只启停，不切组；要切的话下面自己会切
+    power.addEventListener('mousedown', (e) => e.stopPropagation());
+    power.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const st = groupRunState(group);
+      if (st.running < st.total) {
+        if (group.id !== state.activeId) activateGroup(group.id);
+        startGroup(group);
+      } else {
+        stopGroup(group);
+      }
     });
     item.addEventListener('dblclick', (e) => {
       if (e.target.closest('.group-name-input')) return;
@@ -891,6 +906,7 @@ function renderSidebar() {
     list.appendChild(item);
     const els = groupEls.get(group.id);
     if (els) els.item = item;
+    updateGroupMeta(group);   // 徽标「运行/总数」与电源按钮的图标
   }
   updateEmptyState();
 }
@@ -947,6 +963,7 @@ function addPane(group, opts = {}) {
     customTitle: !!opts.customTitle,
     running: false,
     exited: false,
+    suspended: !!opts.suspended,   // 用户主动停止：不自动启动，重启应用后也保持停止
   };
   group.panes.push(meta);
 
@@ -983,6 +1000,11 @@ function addPane(group, opts = {}) {
           <button class="ghost-btn" data-act="close">${escapeHtml(t('pane.close'))}</button>
         </div>
       </div>
+    </div>
+    <div class="pane-stopped">
+      <span class="stopped-text" title="${escapeHtml(t('pane.stoppedHint'))}">${escapeHtml(t('pane.stopped'))}</span>
+      <button class="ghost-btn" data-act="start">${escapeHtml(t('pane.startBtn'))}</button>
+      <button class="ghost-btn" data-act="close">${escapeHtml(t('pane.close'))}</button>
     </div>
     <div class="pane-grip n" data-dir="n"></div>
     <div class="pane-grip s" data-dir="s"></div>
@@ -1042,6 +1064,7 @@ function addPane(group, opts = {}) {
     running: false,
     exited: false,
     error: null,
+    resumeCwd: null,   // 停止时所在的目录，重新启动优先回到这里
   };
   paneMap.set(meta.id, pane);
 
@@ -1085,6 +1108,8 @@ function addPane(group, opts = {}) {
   }
 
   term.onData((data) => {
+    // 停止状态下直接打字 = 顺手启动，并把这一下按键送进去
+    if (pane.meta.suspended) { startPane(pane, { firstData: data }); return; }
     api.writePty(pane.id, data);
     if (data.indexOf('\r') >= 0) noteCommandRun(pane);   // 回一条命令，开始计时
   });
@@ -1149,7 +1174,10 @@ function addPane(group, opts = {}) {
     openPaneMenu(pane, e.clientX, e.clientY);
   });
   el.querySelector('[data-act="restart"]').addEventListener('click', () => restartPane(pane));
-  el.querySelector('[data-act="close"]').addEventListener('click', () => removePane(pane.id));
+  const deadClose = el.querySelector('.pane-dead [data-act="close"]');
+  if (deadClose) deadClose.addEventListener('click', () => removePane(pane.id));
+  el.querySelector('.pane-stopped [data-act="start"]').addEventListener('click', () => startPane(pane));
+  el.querySelector('.pane-stopped [data-act="close"]').addEventListener('click', () => removePane(pane.id));
 
   const ro = new ResizeObserver(() => scheduleFit(pane));
   ro.observe(pane.bodyEl);
@@ -1160,6 +1188,8 @@ function addPane(group, opts = {}) {
   if (group.id === state.activeId) setFocusedPane(pane.id, true);
 
   requestAnimationFrame(() => refitGroup(group));
+
+  if (meta.suspended) markPaneStopped(pane, null);   // 恢复出来就是停止态：只画横幅，不拉 shell
 
   if (!opts.lazy) {
     // 直接把 shell 拉起来，不要塞进 requestAnimationFrame：
@@ -1191,16 +1221,38 @@ function nextPaneSeq(group) {
 
 function updateGroupMeta(group) {
   const els = groupEls.get(group.id);
+  const st = groupRunState(group);
   if (els && els.item) {
     const badge = els.item.querySelector('.group-badge');
-    if (badge) badge.textContent = group.panes.length;
+    if (badge) {
+      // 全部在跑只显示总数；有停着的显示「运行/总数」
+      badge.textContent = st.total && st.running !== st.total ? `${st.running}/${st.total}` : String(st.total);
+      badge.classList.toggle('paused', st.total > 0 && st.running === 0);
+    }
+    syncGroupPower(group, els.item);
   }
   if (group.id !== state.activeId) return;
   $('#group-meta').textContent = t('group.paneCount', { n: group.panes.length });
 }
 
-async function ensureSpawn(pane) {
+// 侧栏组行右侧那个电源按钮：全在跑 = 停止整组，有停着的 = 启动整组
+function syncGroupPower(group, item) {
+  const btn = item && item.querySelector('.group-power');
+  if (!btn) return;
+  const st = groupRunState(group);
+  const canStart = st.total > 0 && st.running < st.total;
+  btn.dataset.state = canStart ? 'start' : 'stop';
+  btn.title = canStart ? t('group.startAllTitle') : t('group.stopAllTitle');
+  btn.setAttribute('aria-label', canStart ? t('group.startAll') : t('group.stopAll'));
+  btn.hidden = st.total === 0;
+  btn.innerHTML = canStart
+    ? '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M5.2 3.1l7.2 4.9-7.2 4.9z" fill="currentColor"/></svg>'
+    : '<svg viewBox="0 0 16 16" width="12" height="12"><rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.4" fill="currentColor"/></svg>';
+}
+
+async function ensureSpawn(pane, opts = {}) {
   if (pane.running || !paneMap.has(pane.id)) return;
+  if (!opts.force && pane.meta.suspended) return;   // 用户停掉的终端不自动拉起
   pane.exited = false;
   pane.el.classList.remove('exited');
 
@@ -1214,7 +1266,7 @@ async function ensureSpawn(pane) {
     id: pane.id,
     cols: box.cols,
     rows: box.rows,
-    cwd: pane.meta.cwd || state.settings.startDir || null,
+    cwd: opts.cwd || pane.meta.cwd || state.settings.startDir || null,
   });
   if (!res.ok) {
     pane.exited = true;
@@ -1222,8 +1274,14 @@ async function ensureSpawn(pane) {
     showPaneDead(pane, res.error);
     return;
   }
+  if (pane.meta.suspended && !opts.force) {
+    // 等待创建期间用户点了停止：立刻回收，别留下野进程
+    try { api.killPty(pane.id); } catch { /* ignore */ }
+    return;
+  }
   pane.running = true;
   pane.ptySid = res.sid;
+  updateGroupMeta(pane.group);   // 徽标/电源按钮跟着运行数走
   pane.shellPath = res.shell;
   // 新会话 = 新的目录历史，从它的启动目录开始记
   resetDirHistory(pane);
@@ -1242,6 +1300,8 @@ async function ensureSpawn(pane) {
     meta.title = meta.name;
     renderPaneTitle(pane);
   }
+  // 在停止的终端上顺手敲的第一个字，等进程起来再送进去
+  if (opts.firstData) { try { api.writePty(pane.id, opts.firstData); } catch { /* ignore */ } }
 }
 
 /* ------------------------------------------------- 命令块（shell 集成 OSC 133） */
@@ -1501,6 +1561,16 @@ function syncPaneChrome(pane) {
   if (restart) restart.textContent = t('pane.restart');
   const close = el.querySelector('[data-act="close"]');
   if (close) close.textContent = t('pane.close');
+  // 已停止横幅（换语言时保留原来的停止时刻）
+  const sText = el.querySelector('.pane-stopped .stopped-text');
+  if (sText) {
+    sText.textContent = t('pane.stoppedBanner', pane.stoppedAt ? { time: pane.stoppedAt } : undefined);
+    sText.title = t('pane.stoppedHint');
+  }
+  const sStart = el.querySelector('.pane-stopped [data-act="start"]');
+  if (sStart) sStart.textContent = t('pane.startBtn');
+  const sClose = el.querySelector('.pane-stopped [data-act="close"]');
+  if (sClose) sClose.textContent = t('pane.close');
   renderCmdBadge(pane);   // 徽标的 tooltip 也要跟着换语言
   renderPaneTitle(pane);
 }
@@ -1596,11 +1666,115 @@ async function restartPane(pane) {
   }
   pane.error = null;
   pane.exited = false;
-  pane.el.classList.remove('exited');
+  pane.meta.suspended = false;          // 「重新启动」也算一次启动，别再被停止状态挡住
+  pane.el.classList.remove('exited', 'stopped');
   resetCmdState(pane);          // 新 shell 的命令块从头记
   try { pane.term.reset(); } catch { /* ignore */ }
   ensureSpawn(pane);
   focusPane(pane.id);
+}
+
+/* ------------------------------------------------ 停止 / 启动（留窗口、省内存） */
+// 「停止」= 杀掉 PTY 进程，窗口与布局原样保留。状态会写进配置：
+// 重启应用后你停掉的那几组仍然是停的，不用每次开机再点一遍。
+function clockNow() {
+  try { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  catch { return ''; }
+}
+
+function markPaneStopped(pane, time) {
+  if (!pane || !pane.el) return;
+  if (time) pane.stoppedAt = time;
+  pane.el.classList.add('stopped');
+  pane.el.classList.remove('exited');
+  const span = pane.el.querySelector('.pane-stopped .stopped-text');
+  if (span) {
+    span.textContent = t('pane.stoppedBanner', pane.stoppedAt ? { time: pane.stoppedAt } : undefined);
+    span.title = t('pane.stoppedHint');
+  }
+}
+
+function groupRunState(group) {
+  let running = 0;
+  for (const m of group.panes) {
+    const p = paneMap.get(m.id);
+    if (p && p.running) running++;
+  }
+  return { running, total: group.panes.length };
+}
+
+// 返回 true 表示这次确实杀掉了进程
+function stopPane(pane, opts = {}) {
+  if (!pane || !paneMap.has(pane.id)) return false;
+  const wasRunning = pane.running;
+  pane.meta.suspended = true;
+  if (wasRunning) {
+    pane.resumeCwd = pane.meta.liveCwd || null;   // 停止时在哪，重新启动就回哪
+    try { api.killPty(pane.id); } catch { /* 进程可能已经没了 */ }
+    pane.running = false;
+    pane.ptySid = null;
+  }
+  resetCmdState(pane);        // 计时中的命令块作废，别记出一条假的长耗时
+  pane.exited = false;
+  pane.error = null;
+  markPaneStopped(pane, opts.time || clockNow());
+  syncPaneChrome(pane);
+  updateGroupMeta(pane.group);
+  renderSidebar();
+  if (!opts.silent) persist();
+  return wasRunning;
+}
+
+function startPane(pane, opts = {}) {
+  if (!pane || !paneMap.has(pane.id)) return;
+  pane.meta.suspended = false;
+  if (pane.running) { pane.el.classList.remove('stopped'); updateGroupMeta(pane.group); return; }
+  pane.el.classList.remove('stopped', 'exited');
+  pane.exited = false;
+  pane.error = null;
+  resetCmdState(pane);
+  try { pane.term.reset(); } catch { /* ignore */ }
+  const cwd = pane.resumeCwd || null;
+  pane.resumeCwd = null;
+  ensureSpawn(pane, { force: true, cwd, firstData: opts.firstData });
+  syncPaneChrome(pane);
+  updateGroupMeta(pane.group);
+  renderSidebar();
+  if (!opts.silent) { focusPane(pane.id); persist(); }
+}
+
+// 整组：全停 / 全起。批量启动要错开，否则 8 个 PowerShell 同时冷启动会卡一下
+function stopGroup(group, opts = {}) {
+  if (!group) return 0;
+  let n = 0;
+  for (const m of group.panes) {
+    const p = paneMap.get(m.id);
+    if (p && p.running) { stopPane(p, { silent: true, time: opts.time }); n++; }
+  }
+  updateGroupMeta(group);
+  renderSidebar();
+  persist();
+  toast(n ? t('group.stoppedToast', { n }) : t('group.alreadyStopped'), n ? 2200 : 1500);
+  return n;
+}
+
+function startGroup(group, opts = {}) {
+  if (!group) return 0;
+  const need = [];
+  for (const m of group.panes) {
+    const p = paneMap.get(m.id);
+    if (p && !p.running) need.push(p);
+  }
+  need.forEach((p, i) => {
+    if (i === 0) { startPane(p, { silent: true }); return; }
+    setTimeout(() => { if (paneMap.has(p.id)) startPane(p, { silent: true }); }, i * 120);
+  });
+  updateGroupMeta(group);
+  renderSidebar();
+  persist();
+  if (need.length) toast(t('group.startedToast', { n: need.length }), 1700);
+  if (group.id === state.activeId && !opts.noFocus) setTimeout(() => focusActivePane(), 280);
+  return need.length;
 }
 
 function setFocusedPane(paneId, silent) {
@@ -1902,6 +2076,10 @@ function openPaneMenu(pane, x, y) {
   if (pane.meta.customTitle) {
     items.push({ key: 'menu.pane.restoreTitle', label: t('menu.pane.restoreTitle'), action: () => { setPaneTitle(pane, ''); toast(t('pane.renameReset')); } });
   }
+  // 停止 / 启动：只有真的在跑才有「停止」，停止态给「启动」
+  const power = pane.meta.suspended
+    ? [{ key: 'menu.pane.start', label: t('pane.start'), action: () => startPane(pane) }]
+    : (pane.running ? [{ key: 'menu.pane.stop', label: t('pane.stop'), action: () => stopPane(pane) }] : []);
   items.push(
     '-',
     {
@@ -1959,6 +2137,7 @@ function openPaneMenu(pane, x, y) {
     { key: 'menu.pane.jumpPrev', label: t('menu.pane.jumpPrev'), hint: 'Ctrl+↑', action: () => jumpCommand(pane, -1) },
     { key: 'menu.pane.jumpNext', label: t('menu.pane.jumpNext'), hint: 'Ctrl+↓', action: () => jumpCommand(pane, 1) },
     '-',
+    ...power,
     { key: 'menu.pane.clear', label: t('menu.pane.clear'), hint: 'Ctrl+L', action: () => { pane.term.clear(); pane.term.focus(); } },
     { key: 'menu.pane.restart', label: t('menu.pane.restart'), action: () => restartPane(pane) },
     '-',
@@ -2432,6 +2611,11 @@ function openLayoutMenu(anchor) {
 function openGroupMenu(group, x, y) {
   openMenu(x, y, [
     { key: 'group.menu.newPane', label: t('group.menu.newPane'), action: () => { activateGroup(group.id); addPane(group); } },
+    { key: 'group.startAll', label: t('group.startAll'), action: () => {
+        if (group.id !== state.activeId) activateGroup(group.id);
+        startGroup(group);
+      } },
+    { key: 'group.stopAll', label: t('group.stopAll'), action: () => stopGroup(group) },
     { key: 'group.menu.pin', label: group.pinned ? t('group.unpin') : t('group.pin'), action: () => setGroupPinned(group.id, !group.pinned) },
     { key: 'group.rename', label: t('group.rename'), action: () => {
         activateGroup(group.id);
@@ -2693,6 +2877,7 @@ function doPersist() {
         seq: p.seq || null,
         title: p.title || null,
         custom: !!p.customTitle,
+        suspended: !!p.suspended,
         rect: validRect(p.rect) ? roundRect(p.rect) : null,
       })),
     })),
@@ -3009,6 +3194,7 @@ async function boot() {
     const pane = paneMap.get(id);
     if (!pane) return;
     if (sid && pane.ptySid && sid !== pane.ptySid) return; // 重启前的旧进程退出通知
+    if (pane.meta.suspended) return;  // 是我们主动停的，别把它变成「终端已退出」
     pane.running = false;
     pane.exited = true;
     pane.el.classList.add('exited');
@@ -3049,6 +3235,7 @@ async function boot() {
           seq: seed.seq,
           title: seed.title,
           customTitle: !!seed.custom,
+          suspended: !!seed.suspended,
           rect: seed.rect,
           lazy: true,
         });
@@ -3093,6 +3280,7 @@ async function boot() {
       computeLayout, applyLayoutRects, applyLayoutTo, applyLayoutToAll, syncGroupRects,
       startPaneDrag, openLayoutMenu,
       jumpCommand, copyCommandOutput, shouldNotify, resetCmdState, fmtDur,
+      stopPane, startPane, stopGroup, startGroup, groupRunState, openGroupMenu,
     },
     bufferText,
   };

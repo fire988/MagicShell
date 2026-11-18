@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('ms', {
   writePty: (id, data) => ipcRenderer.send('pty:input', { id, data }),
   resizePty: (id, cols, rows) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   killPty: (id) => ipcRenderer.send('pty:kill', { id }),
+  ptyStats: () => ipcRenderer.invoke('pty:stats'),
 
   // 事件
   onPtyData: (cb) => ipcRenderer.on('pty:data', (_e, msg) => cb(msg)),
