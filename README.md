@@ -5,6 +5,8 @@
 
 ![界面示意](docs/screenshot-dark.png)
 
+> **不想装环境？** 直接下载 [Releases](https://github.com/fire988/MagicShell/releases) 里的免安装包（`MagicShell-*-win-x64.zip`），解压后双击 `MagicShell.exe` 即可，不需要 Node.js 或编译工具。
+
 ## 为什么要自己写
 
 原生 PowerShell 窗口一次只能看一个会话，切换靠 Alt+Tab；窗口位置散乱、改背景色只能改整个控制台属性。
