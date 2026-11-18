@@ -1,5 +1,7 @@
 # MagicShell
 
+[English](README.en.md) | **简体中文**
+
 一个「分组式」Windows 终端工作台：底层就是真的 PowerShell（ConPTY + pwsh/powershell/cmd），
 所以命令、补全、颜色、交互与 PowerShell 完全一致，只是把窗口管理换成了更适合多任务的方式。
 
@@ -146,7 +148,7 @@ MagicShell 拿它把每条命令收成一个「块」：
 - 执行时机：新建终端、`重新启动`、停止后再启动，都会在**第一个提示符出现之前**跑完，所以脚本里的 `Write-Host` 会成为你看到的第一行
 - **在当前作用域执行**（PowerShell 用 dot-source）：脚本里设的 `$env:XXX`、定义的函数在会话里继续可用，不是跑完就没
 - 不会像「被输入过一遍」那样把脚本内容回显在屏幕上，也不会挤进命令历史；脚本里的 `cd` 会被 OSC 7 接住，标题栏、菜单里的「当前所在目录」立刻跟着变
-- 实现上不塞命令行（长度有限、转义地狱），而是写到 `%APPDATA%\MagicShell\startup\<终端 id>.ps1`（cmd 则是 `.cmd`，自动加 `@echo off`），再由 shell 启动时 dot-source / `/K` 执行；每次启动都重写，退出时会清掉
+- 实现上不塞命令行（长度有限、转义地狱），而是写到 `%APPDATA%\MagicShell\startup\<终端 id>.ps1`（cmd 则是 `.cmd`，自动加 `@echo off`），再由 shell 启动时 dot-source / `/K` 执行；每次启动都会先清掉上次留下的旧文件，再按需重写
 - 脚本随分组一起落盘，重载/重启后原样还在；不想要了就「清空 → 保存」
 - 上限 20000 字符（弹层里实时显示行数与字符数）
 
