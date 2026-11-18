@@ -159,13 +159,13 @@ npm start
 
 ## 打包成 exe
 
-已经打好一份免安装版在 `dist/MagicShell/`，双击里面的 `MagicShell.exe` 即可运行（整个文件夹可以拷到任意位置）。
-
-重新打包：
+`dist/` 是打包产物，不进版本库（见 `.gitignore`），需要自己打一份：
 
 ```bash
 npm run package     # 直接把 Electron 运行时 + 应用代码组装到 dist/MagicShell
 ```
+
+产物在 `dist/MagicShell/`：双击里面的 `MagicShell.exe` 即可运行，整个文件夹可以拷到任意位置（免安装）。
 
 也保留了 electron-builder 配置（`npm run dist`，出单文件 portable exe）。
 注意：本机网络代理会让 electron-builder 下载 winCodeSign/NSIS 资源时返回 502，
