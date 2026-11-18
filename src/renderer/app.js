@@ -964,6 +964,7 @@ function addPane(group, opts = {}) {
     running: false,
     exited: false,
     suspended: !!opts.suspended,   // 用户主动停止：不自动启动，重启应用后也保持停止
+    script: String(opts.script == null ? '' : opts.script).slice(0, SCRIPT_MAX),
   };
   group.panes.push(meta);
 
@@ -979,6 +980,9 @@ function addPane(group, opts = {}) {
       <span class="pane-title" title="${escapeHtml(t('pane.renameTip'))}">${escapeHtml(meta.title)}</span>
       <span class="cmd-badge" hidden></span>
       <div class="pane-tools">
+        <button class="tool-btn script" data-act="script" title="${escapeHtml(t('script.buttonTitle'))}">
+          <svg viewBox="0 0 16 16" width="13" height="13"><path d="M3.1 4.3l3.3 3.7-3.3 3.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.7 11.7h4.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </button>
         <button class="tool-btn copy" data-act="copy" title="${escapeHtml(t('pane.copyAllTitle'))}">
           <svg viewBox="0 0 16 16" width="12" height="12"><path d="M6 2h6a2 2 0 0 1 2 2v6M4 6h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
           <span class="tool-label">${escapeHtml(t('pane.copyAll'))}</span>
@@ -1159,6 +1163,10 @@ function addPane(group, opts = {}) {
     e.stopPropagation();
     copyAll(pane);
   });
+  el.querySelector('[data-act="script"]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    openScriptDialog(pane);
+  });
   el.querySelector('[data-act="pin"]').addEventListener('click', (e) => {
     e.stopPropagation();
     setGroupPinned(group.id, !group.pinned);
@@ -1185,6 +1193,7 @@ function addPane(group, opts = {}) {
 
   syncPaneTheme(pane);
   renderPaneTitle(pane);
+  syncScriptButton(pane);
   if (group.id === state.activeId) setFocusedPane(pane.id, true);
 
   requestAnimationFrame(() => refitGroup(group));
@@ -1267,6 +1276,7 @@ async function ensureSpawn(pane, opts = {}) {
     cols: box.cols,
     rows: box.rows,
     cwd: opts.cwd || pane.meta.cwd || state.settings.startDir || null,
+    script: pane.meta.script || null,
   });
   if (!res.ok) {
     pane.exited = true;
@@ -1283,6 +1293,7 @@ async function ensureSpawn(pane, opts = {}) {
   pane.ptySid = res.sid;
   updateGroupMeta(pane.group);   // 徽标/电源按钮跟着运行数走
   pane.shellPath = res.shell;
+  syncScriptButton(pane);        // 示例片段按真实 shell 给（pwsh / cmd）
   // 新会话 = 新的目录历史，从它的启动目录开始记
   resetDirHistory(pane);
   if (res.cwd) {
@@ -1537,6 +1548,8 @@ function renderPaneTitle(pane) {
   el.textContent = pane.meta.title || pane.meta.name || '';
   const tips = [];
   if (pane.meta.cwd) tips.push(t('pane.startDir', { dir: pane.meta.cwd }));
+  const lines = scriptLineCount(pane.meta.script);
+  if (lines) tips.push(t('pane.scriptTip', { lines }));
   tips.push(t('pane.dragHint'), t('pane.dblRenameHint'));
   el.title = tips.join(' · ');
 }
@@ -1553,6 +1566,7 @@ function syncPaneChrome(pane) {
   }
   const pin = el.querySelector('[data-act="pin"]');
   if (pin) pin.title = t('pane.pinTitle');
+  syncScriptButton(pane);   // 脚本按钮的 tooltip 也要跟着换语言
   const more = el.querySelector('[data-act="more"]');
   if (more) more.title = t('pane.more');
   const dead = el.querySelector('.dead-text');
@@ -2089,6 +2103,14 @@ function openPaneMenu(pane, x, y) {
       action: () => openCwdDialog(pane),
     },
     {
+      key: 'menu.pane.script',
+      label: t('menu.pane.script'),
+      hint: scriptLineCount(pane.meta.script)
+        ? t('menu.pane.scriptSet', { lines: scriptLineCount(pane.meta.script) })
+        : t('menu.pane.scriptNone'),
+      action: () => openScriptDialog(pane),
+    },
+    {
       key: 'menu.pane.newHere',
       label: t('menu.pane.newHere'),
       action: () => {
@@ -2495,6 +2517,197 @@ function bindCwdDialog() {
   });
 }
 
+/* ---------------------------------------------------------- 启动脚本（每终端） */
+// 一个终端一段脚本：新建 / 重启 / 停止后再启动时自动执行。
+// 文本存在 meta.script 里（落盘在配置的 groups[].panes[].script），
+// 真正的执行交给主进程：落成 userData/startup/<id>.ps1，再由 shell 启动时 dot-source。
+// 好处是脚本里设置的环境变量、函数会留在会话里，且不会像"被输入过一遍"那样糊在屏幕上。
+const SCRIPT_MAX = 20000;
+
+let scriptPane = null;
+
+function isPSShell(shell) {
+  const s = String(shell || '');
+  if (/cmd(\.exe)?$/i.test(s)) return false;
+  if (/pwsh|powershell/i.test(s)) return true;
+  return true;   // auto / 未启动时按默认（优先 PowerShell 7）算
+}
+
+function scriptShell(pane) {
+  return (pane && pane.shellPath) || state.settings.shell || 'auto';
+}
+
+function scriptLineCount(text) {
+  const s = String(text || '');
+  if (!s.trim()) return 0;
+  return s.replace(/\s+$/, '').split(/\r?\n/).length;
+}
+
+// 标题栏上的脚本按钮：有脚本时点亮成主题色，一眼能看出这个终端"带了点东西"
+function syncScriptButton(pane) {
+  const btn = pane && pane.el && pane.el.querySelector('[data-act="script"]');
+  if (!btn) return;
+  const lines = scriptLineCount(pane.meta.script);
+  btn.classList.toggle('on', lines > 0);
+  btn.title = lines > 0 ? t('script.buttonHas', { lines }) : t('script.buttonTitle');
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function openScriptDialog(pane) {
+  if (!pane || !paneMap.has(pane.id)) return;
+  if (state.activeId !== pane.group.id) activateGroup(pane.group.id);
+  scriptPane = pane;
+  const input = $('#script-input');
+  input.value = pane.meta.script || '';
+  $('#script').hidden = false;
+  $('#script-mask').hidden = false;
+  mountScriptSamples();
+  syncScriptDialog();
+  input.focus();
+  // 光标放末尾：接着上次写的往下补，比全选覆盖更常用
+  try { input.setSelectionRange(input.value.length, input.value.length); } catch { /* ignore */ }
+}
+
+function closeScriptDialog() {
+  if ($('#script').hidden) return;
+  $('#script').hidden = true;
+  $('#script-mask').hidden = true;
+  scriptPane = null;
+  focusActivePane();
+}
+
+function syncScriptDialog() {
+  if (!scriptPane) return;
+  const input = $('#script-input');
+  const txt = input.value;
+  const ps = isPSShell(scriptShell(scriptPane));
+  $('#script-target').textContent = scriptPane.meta.title || scriptPane.meta.name || '';
+  $('#script-stat').textContent = t('script.stat', { lines: scriptLineCount(txt), chars: txt.length, max: SCRIPT_MAX });
+  $('#script-note').textContent = ps ? t('script.notePs') : t('script.noteCmd');
+  $('#script-example').textContent = ps ? '. $PROFILE  # 或任意 PowerShell 片段' : 'REM 任意批处理片段';
+  input.placeholder = ps ? t('script.placeholderPs') : t('script.placeholderCmd');
+  const runBtn = $('#script-run');
+  runBtn.disabled = !scriptPane.running || !txt.trim();
+  runBtn.title = runBtn.disabled
+    ? (scriptPane.running ? t('script.runDisabledEmpty') : t('script.notRunning'))
+    : t('script.runTitle');
+}
+
+// 常用片段：按这个终端实际的 shell 给（pwsh 和 cmd 的写法差得挺远）
+function mountScriptSamples() {
+  const box = $('#script-samples');
+  if (!box || !scriptPane) return;
+  box.innerHTML = '';
+  const ps = isPSShell(scriptShell(scriptPane));
+  const list = ps
+    ? [
+      { key: 'script.sampleCd', code: 'Set-Location C:\\Work' },
+      { key: 'script.sampleEnv', code: "$env:NODE_ENV = 'development'" },
+      { key: 'script.sampleFn', code: 'function ll { Get-ChildItem -Force }' },
+    ]
+    : [
+      { key: 'script.sampleCd', code: 'cd /d C:\\Work' },
+      { key: 'script.sampleEnv', code: 'set NODE_ENV=development' },
+      { key: 'script.sampleFn', code: 'doskey ll=dir /a' },
+    ];
+  for (const it of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cwd-chip';
+    b.title = it.code;
+    b.innerHTML = `<span class="chip-k">${escapeHtml(t(it.key))}</span>`;
+    b.addEventListener('click', () => insertScriptText(it.code));
+    box.appendChild(b);
+  }
+}
+
+// 插到光标处（空行自动补一个换行，免得两行粘在一起）
+function insertScriptText(code) {
+  const input = $('#script-input');
+  const cur = input.value;
+  const start = input.selectionStart == null ? cur.length : input.selectionStart;
+  const end = input.selectionEnd == null ? start : input.selectionEnd;
+  const before = cur.slice(0, start);
+  const text = (before && !/\n$/.test(before) ? '\n' : '') + code;
+  input.value = before + text + cur.slice(end);
+  const pos = (before + text).length;
+  input.focus();
+  try { input.setSelectionRange(pos, pos); } catch { /* ignore */ }
+  syncScriptDialog();
+}
+
+async function saveScriptDialog(restart) {
+  const pane = scriptPane;
+  if (!pane) return;
+  const text = $('#script-input').value.slice(0, SCRIPT_MAX);
+  const trimmed = text.trim();
+  pane.meta.script = trimmed ? text : '';
+  syncScriptButton(pane);
+  renderPaneTitle(pane);
+  persist(true);
+  closeScriptDialog();
+  if (restart) {
+    await restartPane(pane);
+    toast(trimmed ? t('script.savedRestart') : t('script.clearedRestart'), 2600);
+  } else if (!trimmed) {
+    toast(t('script.cleared'));
+  } else if (pane.running) {
+    toast(t('script.savedPending'), 2800);
+  } else {
+    toast(t('script.saved'));
+  }
+}
+
+// 「在当前终端运行一次」：不动启动配置，只是把编辑框里的内容送进正在跑的 shell
+async function runScriptOnce() {
+  const pane = scriptPane;
+  if (!pane) return;
+  const text = $('#script-input').value;
+  if (!text.trim()) { toast(t('script.empty')); return; }
+  if (!pane.running) { toast(t('script.notRunning'), 2400); return; }
+  const r = await api.scriptRun({ id: pane.id, text });
+  if (!r || !r.ok) {
+    toast(t('script.runFailed', { reason: (r && r.error) || '?' }), 2800);
+    return;
+  }
+  toast(t('script.runSent'), 2200);
+  closeScriptDialog();
+  try { pane.term.focus(); } catch { /* ignore */ }
+}
+
+function bindScriptDialog() {
+  $('#script-mask').addEventListener('click', closeScriptDialog);
+  $('#btn-close-script').addEventListener('click', closeScriptDialog);
+  $('#script-save').addEventListener('click', () => saveScriptDialog(false));
+  $('#script-save-restart').addEventListener('click', () => saveScriptDialog(true));
+  $('#script-run').addEventListener('click', runScriptOnce);
+  $('#script-clear').addEventListener('click', () => {
+    $('#script-input').value = '';
+    syncScriptDialog();
+    $('#script-input').focus();
+  });
+  const input = $('#script-input');
+  input.addEventListener('input', syncScriptDialog);
+  input.addEventListener('keydown', (e) => {
+    // Ctrl+Enter：保存并重启（脚本最常用的动作，给它一个不离开键盘的出口）
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      saveScriptDialog(true);
+      return;
+    }
+    // Tab 在编辑器里缩进，别跳走焦点
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const start = input.selectionStart;
+      const end = input.selectionEnd;
+      const cur = input.value;
+      input.value = `${cur.slice(0, start)}  ${cur.slice(end)}`;
+      input.setSelectionRange(start + 2, start + 2);
+      syncScriptDialog();
+    }
+  });
+}
+
 /* ---------------------------------------------------------- 自动排列菜单 */
 function thumbSvg(rects) {
   const W = 20;
@@ -2878,6 +3091,7 @@ function doPersist() {
         title: p.title || null,
         custom: !!p.customTitle,
         suspended: !!p.suspended,
+        script: p.script || null,
         rect: validRect(p.rect) ? roundRect(p.rect) : null,
       })),
     })),
@@ -2892,11 +3106,18 @@ function onKeyDown(e) {
 
   if (e.key === 'Escape') {
     closeCtxMenu();
+    if (!$('#script').hidden) { closeScriptDialog(); return; }
     if (!$('#cwd').hidden) { closeCwdDialog(); return; }
     if (!$('#look').hidden) { closeLook(); return; }
     if (!$('#drawer').hidden) closeDrawer();
     return;
   }
+
+  // 弹层/输入框正在收键盘：别让 Ctrl+T、Ctrl+W 之类把脚下的东西顶掉
+  const keyTarget = e.target;
+  if (keyTarget && typeof keyTarget.closest === 'function'
+    && keyTarget.closest('input, textarea, select, #script, #cwd')
+    && !keyTarget.classList.contains('xterm-helper-textarea')) return;
 
   // Alt+← / Alt+→：在目录历史里逐级回退 / 前进；Alt+↑：回到上一级目录
   if (e.altKey && !ctrl && !e.shiftKey) {
@@ -3167,6 +3388,7 @@ async function boot() {
   applyTheme();
   bindSettings();
   bindCwdDialog();
+  bindScriptDialog();
   bindSidebar();
   syncSettingsInputs();   // 让抽屉里的语言/字号等控件一开始就和配置一致
 
@@ -3236,6 +3458,7 @@ async function boot() {
           title: seed.title,
           customTitle: !!seed.custom,
           suspended: !!seed.suspended,
+          script: seed.script || null,
           rect: seed.rect,
           lazy: true,
         });
@@ -3275,6 +3498,8 @@ async function boot() {
       startRenamePane, setPaneTitle, openLook, closeLook, setPaneLook,
       applyLookToAll, resetAllPanesToWindow,
       openCwdDialog, closeCwdDialog, setPaneCwd, saveCwdDialog, paneCwd, restartPane,
+      openScriptDialog, closeScriptDialog, saveScriptDialog, runScriptOnce,
+      scriptLineCount, syncScriptButton, isPSShell, insertScriptText,
       jumpDir, goParentDir, goToHistIndex, resetDirHistory, noteDirVisit, openPaneMenu,
       toggleSidebar, setSidebarCollapsed, setSidebarWidth, applySidebar,
       computeLayout, applyLayoutRects, applyLayoutTo, applyLayoutToAll, syncGroupRects,

@@ -229,6 +229,37 @@ await ev(`
   return true;
 `);
 
+// 启动脚本弹层：左边那个终端带一段"切目录 + 设环境变量"的脚本
+await ev(`
+  const A = __ms.actions, S = __ms.state;
+  const g = S.groups.find((x) => x.id === S.activeId);
+  const p = __ms.paneMap.get(g.panes[0].id);
+  p.meta.script = [
+    '# 每次开这个终端：切到项目、把环境摆好',
+    'Set-Location C:\\\\Work\\\\Projects\\\\Dev\\\\MagicShell',
+    "$env:NODE_ENV = 'development'",
+    "$env:MS_PROFILE = 'magicshell'",
+    "Write-Host \\"MagicShell dev shell ready\\" -ForegroundColor DarkGray",
+  ].join('\\n');
+  A.syncScriptButton(p);
+  A.openScriptDialog(p);
+  document.getElementById('script-input').value = p.meta.script;
+  document.getElementById('script-input').dispatchEvent(new Event('input'));
+  await new Promise((r) => setTimeout(r, 700));
+  return true;
+`);
+await shot('docs/screenshot-script.png');
+await ev(`
+  const S = __ms.state;
+  const g = S.groups.find((x) => x.id === S.activeId);
+  const p = __ms.paneMap.get(g.panes[0].id);
+  p.meta.script = '';
+  __ms.actions.syncScriptButton(p);
+  __ms.actions.closeScriptDialog();
+  await new Promise((r) => setTimeout(r, 300));
+  return true;
+`);
+
 // 英文界面：切语言立刻生效、不重启；顺手开个右键菜单看菜单项也跟着变
 await ev(`
   const sel = document.getElementById('input-language');

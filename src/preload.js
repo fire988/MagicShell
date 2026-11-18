@@ -31,6 +31,9 @@ contextBridge.exposeInMainWorld('ms', {
   killPty: (id) => ipcRenderer.send('pty:kill', { id }),
   ptyStats: () => ipcRenderer.invoke('pty:stats'),
 
+  // 启动脚本（在当前终端里跑一次）
+  scriptRun: (payload) => ipcRenderer.invoke('script:run', payload),
+
   // 事件
   onPtyData: (cb) => ipcRenderer.on('pty:data', (_e, msg) => cb(msg)),
   onPtyExit: (cb) => ipcRenderer.on('pty:exit', (_e, msg) => cb(msg)),

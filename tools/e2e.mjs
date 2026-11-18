@@ -54,9 +54,13 @@ async function main() {
   // 1. 单组多终端：并排平铺
   let r = await ev(`
     const A = __ms.actions, S = __ms.state;
-    // 清空到只剩一个分组、一个终端
+    // 清空到只剩一个分组、一个终端（前一个用例可能把分组全关了，这里自己补一个）
     while (S.groups.length > 1) A.closeGroup(S.groups[S.groups.length - 1].id);
     let g = S.groups[0];
+    if (!g) {
+      g = A.createGroup({ name: 'E2E' });
+      await new Promise((r) => setTimeout(r, 2000));
+    }
     while (g.panes.length > 1) A.removePane(g.panes[g.panes.length - 1].id, { silent: true });
     // 清掉历史的自定义配色/布局，保证从干净状态开始
     S.settings.paneBg = null; S.settings.paneFg = null;

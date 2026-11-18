@@ -280,6 +280,43 @@
     </div>
   </section>
 
+  <!-- ------------------------------------------------------- 启动脚本弹层 -->
+  <div id="script-mask" class="modal-mask" hidden></div>
+  <section id="script" class="modal modal-script" hidden>
+    <header class="modal-head">
+      <h3><span data-i18n="script.title">启动脚本</span><span id="script-target" class="look-target"></span></h3>
+      <button id="btn-close-script" class="icon-btn" data-i18n-aria="app.close" aria-label="关闭">✕</button>
+    </header>
+    <div class="modal-body">
+      <div class="field">
+        <label data-i18n="script.when">这个终端每次启动时执行</label>
+        <div class="field-note" id="script-note"></div>
+      </div>
+
+      <div class="field">
+        <textarea id="script-input" class="script-input" spellcheck="false" rows="12" wrap="off"></textarea>
+        <div class="script-footnote">
+          <span id="script-stat" class="script-stat"></span>
+          <span class="script-kbd"><kbd>Ctrl</kbd><kbd>Enter</kbd> <span data-i18n="script.kbdSaveRestart">保存并重启</span></span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label><span data-i18n="script.samples">插一段常用片段</span><code id="script-example" class="script-eg"></code></label>
+        <div id="script-samples" class="cwd-chips"></div>
+      </div>
+
+      <div class="modal-foot">
+        <button id="script-clear" class="ghost-btn" data-i18n-title="script.clearTitle" data-i18n="script.clear" title="清空输入框（点保存才生效）">清空</button>
+        <div class="cwd-foot-right">
+          <button id="script-run" class="ghost-btn" data-i18n="script.run" data-i18n-title="script.runTitle" title="把脚本送进这个终端执行一次，不改启动配置">在当前终端运行一次</button>
+          <button id="script-save" class="ghost-btn" data-i18n="script.save">保存</button>
+          <button id="script-save-restart" class="primary-btn" data-i18n="script.saveRestart">保存并重启</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ------------------------------------------------------------- 右键菜单 -->
   <div id="ctx-menu" class="ctx-menu" hidden></div>
   <div id="toast" class="toast" hidden></div>

@@ -204,10 +204,59 @@ try {
   }
 } catch { }
 `;
-const OSC_HOOK_ARGV = ['-NoExit', '-EncodedCommand', Buffer.from(OSC_HOOK_PS, 'utf16le').toString('base64')];
-
 function isPowerShell(file) {
   return /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/i.test(String(file || ''));
+}
+
+// ------------------------------------------------------------- 启动脚本
+// 每个终端可以带一段"启动脚本"。它不走命令行参数（长度有限、转义地狱），而是写到
+// userData/startup/<id>.ps1，再由 shell 启动时 dot-source 它：
+//   - PowerShell 用 -EncodedCommand 把「prompt 钩子 + . '脚本'」一起交代，脚本在第一个
+//     提示符出现之前就跑完，屏幕上不会留下一串"像是被输入过"的命令；
+//   - dot-source 在当前作用域执行，脚本里设置的环境变量、函数能留在会话里（这正是启动脚本该有的样子）；
+//   - cmd 没有等价物，退化成 /K <批处理文件>。
+const SCRIPT_MAX = 20000;   // 和渲染层输入框的上限保持一致
+
+const SCRIPT_DIR = () => path.join(app.getPath('userData'), 'startup');
+
+function scriptPathFor(id, ext) {
+  const safe = String(id || '').replace(/[^\w.-]/g, '_') || 'pane';
+  return path.join(SCRIPT_DIR(), `${safe}.${ext}`);
+}
+
+// 返回写好的文件路径；没有脚本内容就返回 null
+function writeStartupScript(id, text, shellFile) {
+  const body = String(text == null ? '' : text).slice(0, SCRIPT_MAX);
+  if (!body.trim()) return null;
+  const ps = isPowerShell(shellFile);
+  const file = scriptPathFor(id, ps ? 'ps1' : 'cmd');
+  try {
+    fs.mkdirSync(SCRIPT_DIR(), { recursive: true });
+    // PowerShell 5.1 读没有 BOM 的文件会按 ANSI 解码，中文注释会变乱码；
+    // cmd 则默认把每条命令本身也回显一遍，加一行 @echo off 让启动过程干净些
+    const head = ps ? '\uFEFF' : '@echo off\r\n';
+    fs.writeFileSync(file, head + body.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n'), 'utf8');
+    return file;
+  } catch (err) {
+    console.error('[MagicShell] 启动脚本写入失败', err);
+    return null;
+  }
+}
+
+function clearStartupScript(id) {
+  for (const ext of ['ps1', 'cmd']) {
+    try { fs.unlinkSync(scriptPathFor(id, ext)); } catch { /* 没有就算了 */ }
+  }
+}
+
+function resetStartupDir() {
+  try { fs.rmSync(SCRIPT_DIR(), { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+// 在正在跑的 shell 里执行脚本用的那行命令
+function scriptRunCommand(file, ps) {
+  if (ps) return `. '${String(file).replace(/'/g, "''")}'`;
+  return `call "${file}"`;
 }
 
 // -------------------------------------------------------------------- window
@@ -475,10 +524,23 @@ function registerIpc() {
       TERM_PROGRAM: 'MagicShell',
     };
 
-    // PowerShell 额外挂一个 prompt 钩子：实时目录（OSC 7）+ 命令边界与退出码（OSC 133）
-    const args = isPowerShell(shell.file) && opts.trackCwd !== false
-      ? [...shell.args, ...OSC_HOOK_ARGV]
-      : shell.args;
+    // 启动脚本先落盘（没有脚本就顺手清掉上次留下的文件）
+    const scriptFile = writeStartupScript(id, opts.script, shell.file);
+    if (!scriptFile) clearStartupScript(id);
+
+    // PowerShell 额外挂一个 prompt 钩子：实时目录（OSC 7）+ 命令边界与退出码（OSC 133）；
+    // 有启动脚本时把它一起塞进同一条 EncodedCommand，保证在第一个提示符之前执行完。
+    const ps = isPowerShell(shell.file);
+    const parts = [];
+    if (ps && opts.trackCwd !== false) parts.push(OSC_HOOK_PS);
+    if (scriptFile && ps) parts.push(scriptRunCommand(scriptFile, true));
+    let args = shell.args;
+    if (ps && parts.length) {
+      const enc = Buffer.from(parts.join('\r\n'), 'utf16le').toString('base64');
+      args = [...shell.args, '-NoExit', '-EncodedCommand', enc];
+    } else if (scriptFile) {
+      args = [...shell.args, '/K', scriptFile];
+    }
 
     let proc;
     try {
@@ -499,7 +561,7 @@ function registerIpc() {
     }
 
     const sid = ++sessionSeq;
-    sessions.set(id, { pty: proc, sid });
+    sessions.set(id, { pty: proc, sid, shell: shell.file, scriptPath: scriptFile });
 
     proc.onData((data) => {
       const cur = sessions.get(id);
@@ -544,6 +606,22 @@ function registerIpc() {
     for (const [id, s] of sessions) if (s && s.pty) ids.push(id);
     return { count: ids.length, ids };
   });
+
+  // 「在当前终端运行一次」：写脚本文件，再把它 dot-source 进正在跑的 shell。
+  // 走文件和走启动是同一套路径，所以"这里能跑通"基本等于"下次启动也能跑通"。
+  ipcMain.handle('script:run', (_e, payload = {}) => {
+    const id = String(payload.id || '');
+    const s = sessions.get(id);
+    if (!s) return { ok: false, error: 'not-running' };
+    const file = writeStartupScript(id, payload.text, s.shell);
+    if (!file) return { ok: false, error: 'empty' };
+    try {
+      s.pty.write(scriptRunCommand(file, isPowerShell(s.shell)) + '\r');
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+    return { ok: true, path: file };
+  });
 }
 
 // ---------------------------------------------------------------- app wiring
@@ -559,6 +637,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     syncLocale();
+    // 上次运行留下的脚本临时文件先清掉：这次每个终端启动时会按需重写
+    resetStartupDir();
     registerIpc();
     createWindow();
     app.on('activate', () => {
