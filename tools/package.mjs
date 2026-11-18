@@ -33,11 +33,20 @@ const appPkg = {
   productName: 'MagicShell',
   version: pkg.version,
   description: pkg.description,
+  author: pkg.author,
+  license: pkg.license,
   main: 'src/main.js',
   private: true,
   dependencies: pkg.dependencies,
 };
 fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify(appPkg, null, 2));
+
+// MIT 要求分发二进制时一并附上版权与许可声明
+const licFrom = path.join(root, 'LICENSE');
+if (fs.existsSync(licFrom)) {
+  fs.copyFileSync(licFrom, path.join(outDir, 'LICENSE.txt'));
+  console.log('  + LICENSE.txt');
+}
 
 console.log('复制运行时依赖…');
 const keepMods = ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-webgl', 'node-pty'];
